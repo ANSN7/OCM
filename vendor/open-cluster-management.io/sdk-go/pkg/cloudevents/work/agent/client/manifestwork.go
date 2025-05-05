@@ -3,6 +3,9 @@ package client
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"strconv"
+	"sync"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -17,6 +20,7 @@ import (
 	"open-cluster-management.io/sdk-go/pkg/cloudevents/generic"
 	"open-cluster-management.io/sdk-go/pkg/cloudevents/generic/types"
 	"open-cluster-management.io/sdk-go/pkg/cloudevents/work/common"
+	workerrors "open-cluster-management.io/sdk-go/pkg/cloudevents/work/errors"
 	"open-cluster-management.io/sdk-go/pkg/cloudevents/work/store"
 	"open-cluster-management.io/sdk-go/pkg/cloudevents/work/utils"
 )
@@ -24,6 +28,8 @@ import (
 // ManifestWorkAgentClient implements the ManifestWorkInterface. It sends the manifestworks status back to source by
 // CloudEventAgentClient.
 type ManifestWorkAgentClient struct {
+	sync.RWMutex
+
 	cloudEventsClient *generic.CloudEventAgentClient[*workv1.ManifestWork]
 	watcherStore      store.WorkClientWatcherStore
 
@@ -70,44 +76,74 @@ func (c *ManifestWorkAgentClient) DeleteCollection(ctx context.Context, opts met
 
 func (c *ManifestWorkAgentClient) Get(ctx context.Context, name string, opts metav1.GetOptions) (*workv1.ManifestWork, error) {
 	klog.V(4).Infof("getting manifestwork %s/%s", c.namespace, name)
-	return c.watcherStore.Get(c.namespace, name)
+	work, exists, err := c.watcherStore.Get(c.namespace, name)
+	if err != nil {
+		returnErr := errors.NewInternalError(err)
+		generic.IncreaseWorkProcessedCounter("get", string(returnErr.ErrStatus.Reason))
+		return nil, returnErr
+	}
+	if !exists {
+		returnErr := errors.NewNotFound(common.ManifestWorkGR, name)
+		generic.IncreaseWorkProcessedCounter("get", string(returnErr.ErrStatus.Reason))
+		return nil, returnErr
+	}
+
+	generic.IncreaseWorkProcessedCounter("get", metav1.StatusSuccess)
+	return work, nil
 }
 
 func (c *ManifestWorkAgentClient) List(ctx context.Context, opts metav1.ListOptions) (*workv1.ManifestWorkList, error) {
 	klog.V(4).Infof("list manifestworks from cluster %s", c.namespace)
 	works, err := c.watcherStore.List(c.namespace, opts)
 	if err != nil {
-		return nil, err
+		returnErr := errors.NewInternalError(err)
+		generic.IncreaseWorkProcessedCounter("list", string(returnErr.ErrStatus.Reason))
+		return nil, returnErr
 	}
 
-	items := []workv1.ManifestWork{}
-	for _, work := range works {
-		items = append(items, *work)
-	}
-
-	return &workv1.ManifestWorkList{Items: items}, nil
+	generic.IncreaseWorkProcessedCounter("list", metav1.StatusSuccess)
+	return works, nil
 }
 
 func (c *ManifestWorkAgentClient) Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
 	klog.V(4).Infof("watch manifestworks from cluster %s", c.namespace)
-	return c.watcherStore.GetWatcher(c.namespace, opts)
+	watcher, err := c.watcherStore.GetWatcher(c.namespace, opts)
+	if err != nil {
+		returnErr := errors.NewInternalError(err)
+		generic.IncreaseWorkProcessedCounter("watch", string(returnErr.ErrStatus.Reason))
+		return nil, returnErr
+	}
+
+	generic.IncreaseWorkProcessedCounter("watch", metav1.StatusSuccess)
+	return watcher, nil
 }
 
 func (c *ManifestWorkAgentClient) Patch(ctx context.Context, name string, pt kubetypes.PatchType, data []byte, opts metav1.PatchOptions, subresources ...string) (result *workv1.ManifestWork, err error) {
 	klog.V(4).Infof("patching manifestwork %s/%s", c.namespace, name)
-	lastWork, err := c.watcherStore.Get(c.namespace, name)
+	lastWork, exists, err := c.watcherStore.Get(c.namespace, name)
 	if err != nil {
-		return nil, err
+		returnErr := errors.NewInternalError(err)
+		generic.IncreaseWorkProcessedCounter("patch", string(returnErr.ErrStatus.Reason))
+		return nil, returnErr
+	}
+	if !exists {
+		returnErr := errors.NewNotFound(common.ManifestWorkGR, name)
+		generic.IncreaseWorkProcessedCounter("patch", string(returnErr.ErrStatus.Reason))
+		return nil, returnErr
 	}
 
 	patchedWork, err := utils.Patch(pt, lastWork, data)
 	if err != nil {
-		return nil, err
+		returnErr := errors.NewInternalError(err)
+		generic.IncreaseWorkProcessedCounter("patch", string(returnErr.ErrStatus.Reason))
+		return nil, returnErr
 	}
 
 	eventDataType, err := types.ParseCloudEventsDataType(patchedWork.Annotations[common.CloudEventsDataTypeAnnotationKey])
 	if err != nil {
-		return nil, err
+		returnErr := errors.NewInternalError(err)
+		generic.IncreaseWorkProcessedCounter("patch", string(returnErr.ErrStatus.Reason))
+		return nil, returnErr
 	}
 
 	eventType := types.CloudEventsType{
@@ -119,19 +155,67 @@ func (c *ManifestWorkAgentClient) Patch(ctx context.Context, name string, pt kub
 
 	statusUpdated, err := isStatusUpdate(subresources)
 	if err != nil {
-		return nil, err
+		returnErr := errors.NewGenericServerResponse(http.StatusMethodNotAllowed, "patch", common.ManifestWorkGR, name, err.Error(), 0, false)
+		generic.IncreaseWorkProcessedCounter("patch", string(returnErr.ErrStatus.Reason))
+		return nil, returnErr
 	}
 
 	if statusUpdated {
+		// avoid race conditions among the agent's go routines
+		c.Lock()
+		defer c.Unlock()
+
 		eventType.Action = common.UpdateRequestAction
+		// publish the status update event to source, source will check the resource version
+		// and reject the update if it's status update is outdated.
 		if err := c.cloudEventsClient.Publish(ctx, eventType, newWork); err != nil {
-			return nil, err
+			returnErr := workerrors.NewPublishError(common.ManifestWorkGR, name, err)
+			generic.IncreaseWorkProcessedCounter("patch", string(returnErr.ErrStatus.Reason))
+			return nil, returnErr
 		}
 
+		// Fetch the latest work from the store and verify the resource version to avoid updating the store
+		// with outdated work. Return a conflict error if the resource version is outdated.
+		// Due to the lack of read-modify-write guarantees in the store, race conditions may occur between
+		// this update operation and one from the agent informer after receiving the event from the source.
+		latestWork, exists, err := c.watcherStore.Get(c.namespace, name)
+		if err != nil {
+			returnErr := errors.NewInternalError(err)
+			generic.IncreaseWorkProcessedCounter("patch", string(returnErr.ErrStatus.Reason))
+			return nil, returnErr
+		}
+		if !exists {
+			returnErr := errors.NewNotFound(common.ManifestWorkGR, name)
+			generic.IncreaseWorkProcessedCounter("patch", string(returnErr.ErrStatus.Reason))
+			return nil, returnErr
+		}
+		lastResourceVersion, err := strconv.ParseInt(latestWork.GetResourceVersion(), 10, 64)
+		if err != nil {
+			returnErr := errors.NewInternalError(err)
+			generic.IncreaseWorkProcessedCounter("patch", string(returnErr.ErrStatus.Reason))
+			return nil, returnErr
+		}
+		newResourceVersion, err := strconv.ParseInt(newWork.GetResourceVersion(), 10, 64)
+		if err != nil {
+			returnErr := errors.NewInternalError(err)
+			generic.IncreaseWorkProcessedCounter("patch", string(returnErr.ErrStatus.Reason))
+			return nil, returnErr
+		}
+		// ensure the resource version of the work is not outdated
+		if newResourceVersion < lastResourceVersion {
+			// It's safe to return a conflict error here, even if the status update event
+			// has already been sent. The source may reject the update due to an outdated resource version.
+			returnErr := errors.NewConflict(common.ManifestWorkGR, name, fmt.Errorf("the resource version of the work is outdated"))
+			generic.IncreaseWorkProcessedCounter("patch", string(returnErr.ErrStatus.Reason))
+			return nil, returnErr
+		}
 		if err := c.watcherStore.Update(newWork); err != nil {
-			return nil, err
-
+			returnErr := errors.NewInternalError(err)
+			generic.IncreaseWorkProcessedCounter("patch", string(returnErr.ErrStatus.Reason))
+			return nil, returnErr
 		}
+
+		generic.IncreaseWorkProcessedCounter("patch", metav1.StatusSuccess)
 		return newWork, nil
 	}
 
@@ -147,20 +231,28 @@ func (c *ManifestWorkAgentClient) Patch(ctx context.Context, name string, pt kub
 
 		eventType.Action = common.DeleteRequestAction
 		if err := c.cloudEventsClient.Publish(ctx, eventType, newWork); err != nil {
-			return nil, err
+			returnErr := workerrors.NewPublishError(common.ManifestWorkGR, name, err)
+			generic.IncreaseWorkProcessedCounter("delete", string(returnErr.ErrStatus.Reason))
+			return nil, returnErr
 		}
 
 		if err := c.watcherStore.Delete(newWork); err != nil {
-			return nil, err
+			returnErr := errors.NewInternalError(err)
+			generic.IncreaseWorkProcessedCounter("delete", string(returnErr.ErrStatus.Reason))
+			return nil, returnErr
 		}
 
+		generic.IncreaseWorkProcessedCounter("delete", metav1.StatusSuccess)
 		return newWork, nil
 	}
 
 	if err := c.watcherStore.Update(newWork); err != nil {
-		return nil, err
+		returnErr := errors.NewInternalError(err)
+		generic.IncreaseWorkProcessedCounter("patch", string(returnErr.ErrStatus.Reason))
+		return nil, returnErr
 	}
 
+	generic.IncreaseWorkProcessedCounter("patch", metav1.StatusSuccess)
 	return newWork, nil
 }
 

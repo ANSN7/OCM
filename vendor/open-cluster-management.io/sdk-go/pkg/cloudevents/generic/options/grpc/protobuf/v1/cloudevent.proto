@@ -71,8 +71,13 @@ message PublishRequest {
 }
 
 message SubscriptionRequest {
-  // Required. The original source of the respond CloudEvent(s).
+  // Optional. The original source of the respond CloudEvent(s).
   string source = 1;
+  // Optional. The cluster name of the respond CloudEvent(s).
+  string cluster_name = 2;
+  // Optional. The data type for the respond CloudEvent(s).
+  // eg. io.open-cluster-management.works.v1alpha1.manifests
+  string data_type = 3;
 }
 
 service CloudEventService {

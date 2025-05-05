@@ -70,7 +70,7 @@ func (o *mqttSourceOptions) WithContext(ctx context.Context, evtCtx cloudevents.
 	return cloudeventscontext.WithTopic(ctx, eventsTopic), nil
 }
 
-func (o *mqttSourceOptions) Protocol(ctx context.Context) (options.CloudEventsProtocol, error) {
+func (o *mqttSourceOptions) Protocol(ctx context.Context, dataType types.CloudEventsDataType) (options.CloudEventsProtocol, error) {
 	topicSource, err := getSourceFromEventsTopic(o.Topics.AgentEvents)
 	if err != nil {
 		return nil, err
@@ -82,15 +82,19 @@ func (o *mqttSourceOptions) Protocol(ctx context.Context) (options.CloudEventsPr
 	}
 
 	subscribe := &paho.Subscribe{
-		Subscriptions: map[string]paho.SubscribeOptions{
-			// receiving the agent events
-			o.Topics.AgentEvents: {QoS: byte(o.SubQoS)},
+		Subscriptions: []paho.SubscribeOptions{
+			{
+				Topic: o.Topics.AgentEvents, QoS: byte(o.SubQoS),
+			},
 		},
 	}
 
 	if len(o.Topics.AgentBroadcast) != 0 {
 		// receiving spec resync events from all agents
-		subscribe.Subscriptions[o.Topics.AgentBroadcast] = paho.SubscribeOptions{QoS: byte(o.SubQoS)}
+		subscribe.Subscriptions = append(subscribe.Subscriptions, paho.SubscribeOptions{
+			Topic: o.Topics.AgentBroadcast,
+			QoS:   byte(o.SubQoS),
+		})
 	}
 
 	receiver, err := o.GetCloudEventsProtocol(

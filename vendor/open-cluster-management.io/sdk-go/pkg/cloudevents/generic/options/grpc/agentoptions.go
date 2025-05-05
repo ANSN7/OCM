@@ -33,7 +33,7 @@ func (o *grpcAgentOptions) WithContext(ctx context.Context, evtCtx cloudevents.E
 	return ctx, nil
 }
 
-func (o *grpcAgentOptions) Protocol(ctx context.Context) (options.CloudEventsProtocol, error) {
+func (o *grpcAgentOptions) Protocol(ctx context.Context, dataType types.CloudEventsDataType) (options.CloudEventsProtocol, error) {
 	receiver, err := o.GetCloudEventsProtocol(
 		ctx,
 		func(err error) {
@@ -43,7 +43,9 @@ func (o *grpcAgentOptions) Protocol(ctx context.Context) (options.CloudEventsPro
 			// TODO: Update this code to determine the subscription source for the agent client.
 			// Currently, the grpc agent client is not utilized, and the 'Source' field serves
 			// as a placeholder with all the sources.
-			Source: types.SourceAll,
+			Source:      types.SourceAll,
+			ClusterName: o.clusterName,
+			DataType:    dataType.String(),
 		}),
 	)
 	if err != nil {

@@ -94,8 +94,8 @@ func (p *Protocol) OpenInbound(ctx context.Context) error {
 		return fmt.Errorf("the subscribe option must not be nil")
 	}
 
-	if len(p.subscribeOption.Source) == 0 {
-		return fmt.Errorf("the subscribe option source must not be empty")
+	if len(p.subscribeOption.Source) == 0 && len(p.subscribeOption.ClusterName) == 0 {
+		return fmt.Errorf("the source and cluster name of subscribe option cannot both be empty")
 	}
 
 	p.openerMutex.Lock()
@@ -103,13 +103,20 @@ func (p *Protocol) OpenInbound(ctx context.Context) error {
 
 	logger := cecontext.LoggerFrom(ctx)
 	subClient, err := p.client.Subscribe(ctx, &pbv1.SubscriptionRequest{
-		Source: p.subscribeOption.Source,
+		Source:      p.subscribeOption.Source,
+		ClusterName: p.subscribeOption.ClusterName,
+		DataType:    p.subscribeOption.DataType,
 	})
 	if err != nil {
 		return err
 	}
 
-	logger.Infof("subscribing events for: %v", p.subscribeOption.Source)
+	if p.subscribeOption.Source != "" {
+		logger.Infof("subscribing events for: %v with data types: %v", p.subscribeOption.Source, p.subscribeOption.DataType)
+	} else {
+		logger.Infof("subscribing events for cluster: %v with data types: %v", p.subscribeOption.ClusterName, p.subscribeOption.DataType)
+	}
+
 	go func() {
 		for {
 			msg, err := subClient.Recv()

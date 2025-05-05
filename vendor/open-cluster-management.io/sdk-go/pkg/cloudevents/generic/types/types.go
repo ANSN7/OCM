@@ -60,6 +60,9 @@ const (
 
 	// ExtensionOriginalSource is the cloud event extension key of the original source.
 	ExtensionOriginalSource = "originalsource"
+
+	// ExtensionStatusHash is the cloud event extension key of the status hash.
+	ExtensionStatusHash = "statushash"
 )
 
 // ResourceAction represents an action on a resource object on the source or agent.
@@ -135,6 +138,9 @@ type ListOptions struct {
 	// Agent use the source ID to restrict the list of returned objects by their source ID.
 	// Defaults to all sources.
 	Source string
+
+	// CloudEventsDataType indicates the resource related cloud events data type.
+	CloudEventsDataType CloudEventsDataType
 }
 
 // CloudEventsDataType uniquely identifies the type of cloud event data.
